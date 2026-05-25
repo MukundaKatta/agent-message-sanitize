@@ -1,316 +1,300 @@
-"""Tests for agent_message_sanitize."""
-
-import copy
-
-from agent_message_sanitize import MessageSanitizer
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def make_sanitizer(**kwargs) -> MessageSanitizer:
-    return MessageSanitizer(**kwargs)
+import pytest
+from agent_message_sanitize import (
+    SanitizeResult,
+    sanitize_messages,
+    clean_messages,
+    drop_empty,
+    normalize_roles,
+    ROLE_ALIASES,
+)
 
 
 # ---------------------------------------------------------------------------
-# Basic / happy-path tests
+# Basic sanitize
 # ---------------------------------------------------------------------------
 
-def test_clean_message_no_changes():
-    s = MessageSanitizer()
-    msgs = [{"role": "user", "content": "Hello, world!"}]
-    result = s.sanitize(msgs)
-    assert result.messages == msgs
-    assert result.changes == []
+def test_sanitize_returns_result():
+    r = sanitize_messages([{"role": "user", "content": "hi"}])
+    assert isinstance(r, SanitizeResult)
 
-
-def test_empty_messages_list():
-    s = MessageSanitizer()
-    result = s.sanitize([])
-    assert result.messages == []
-    assert result.changes == []
-
-
-def test_sanitize_result_is_new_list():
-    s = MessageSanitizer()
-    msgs = [{"role": "user", "content": "hi"}]
-    result = s.sanitize(msgs)
-    assert result.messages is not msgs
-
-
-def test_sanitize_one_returns_new_dict():
-    s = MessageSanitizer()
-    msg = {"role": "user", "content": "hi"}
-    new_msg, _ = s.sanitize_one(msg)
-    assert new_msg is not msg
-
-
-def test_message_without_content_key_kept_unchanged():
-    s = MessageSanitizer()
-    msg = {"role": "system"}
-    result = s.sanitize([msg])
-    assert result.messages == [msg]
-    assert result.changes == []
-
-
-def test_multiple_messages_each_sanitized_independently():
-    s = MessageSanitizer(max_content_chars=5)
-    msgs = [
-        {"role": "user", "content": "short"},
-        {"role": "assistant", "content": "longer than five chars"},
-    ]
-    result = s.sanitize(msgs)
-    assert result.messages[0]["content"] == "short"
-    assert result.messages[1]["content"] == "longe..."
-    assert len(result.changes) == 1
-    assert result.changes[0].index == 1
-
-
-# ---------------------------------------------------------------------------
-# Immutability tests
-# ---------------------------------------------------------------------------
-
-def test_never_mutates_input_list():
-    s = MessageSanitizer(max_content_chars=3)
-    original = [{"role": "user", "content": "Hello!"}]
-    snapshot = copy.deepcopy(original)
-    s.sanitize(original)
-    assert original == snapshot
-
-
-def test_never_mutates_input_dicts():
-    s = MessageSanitizer(strip_null_bytes=True)
-    msg = {"role": "user", "content": "hi\x00there"}
-    original_content = msg["content"]
-    s.sanitize([msg])
-    assert msg["content"] == original_content
-
-
-def test_sanitize_one_never_mutates_input():
-    s = MessageSanitizer(max_content_chars=2)
-    msg = {"role": "user", "content": "hello"}
-    s.sanitize_one(msg)
-    assert msg["content"] == "hello"
-
-
-# ---------------------------------------------------------------------------
-# strip_null_bytes tests
-# ---------------------------------------------------------------------------
-
-def test_strip_null_bytes_true_removes_nulls():
-    s = MessageSanitizer(strip_null_bytes=True)
-    msgs = [{"role": "user", "content": "he\x00llo\x00"}]
-    result = s.sanitize(msgs)
-    assert result.messages[0]["content"] == "hello"
-    assert any("null" in c.description for c in result.changes)
-
-
-def test_strip_null_bytes_false_leaves_nulls():
-    s = MessageSanitizer(strip_null_bytes=False)
-    msgs = [{"role": "user", "content": "he\x00llo"}]
-    result = s.sanitize(msgs)
-    assert result.messages[0]["content"] == "he\x00llo"
-    assert result.changes == []
-
-
-def test_strip_null_bytes_records_change_with_correct_index():
-    s = MessageSanitizer(strip_null_bytes=True)
-    msgs = [
-        {"role": "system", "content": "clean"},
-        {"role": "user", "content": "bad\x00"},
-    ]
-    result = s.sanitize(msgs)
-    assert len(result.changes) == 1
-    assert result.changes[0].index == 1
-
-
-# ---------------------------------------------------------------------------
-# coerce_content_to_str tests
-# ---------------------------------------------------------------------------
-
-def test_coerce_int_content_to_str():
-    s = MessageSanitizer(coerce_content_to_str=True)
-    msgs = [{"role": "user", "content": 42}]
-    result = s.sanitize(msgs)
-    assert result.messages[0]["content"] == "42"
-    assert any("coerced" in c.description for c in result.changes)
-
-
-def test_coerce_false_leaves_non_str_as_is():
-    s = MessageSanitizer(coerce_content_to_str=False, remove_none_content=False)
-    msgs = [{"role": "user", "content": 99}]
-    result = s.sanitize(msgs)
-    assert result.messages[0]["content"] == 99
-    assert result.changes == []
-
-
-def test_coerce_records_change_index():
-    s = MessageSanitizer(coerce_content_to_str=True)
-    msgs = [
-        {"role": "system", "content": "ok"},
-        {"role": "user", "content": 3.14},
-    ]
-    result = s.sanitize(msgs)
-    assert result.changes[0].index == 1
-    assert result.messages[1]["content"] == "3.14"
-
-
-# ---------------------------------------------------------------------------
-# remove_none_content tests
-# ---------------------------------------------------------------------------
-
-def test_remove_none_content_true_drops_message():
-    s = MessageSanitizer(remove_none_content=True, coerce_content_to_str=False)
-    msgs = [
-        {"role": "user", "content": "hi"},
-        {"role": "assistant", "content": None},
-    ]
-    result = s.sanitize(msgs)
-    assert len(result.messages) == 1
-    assert result.messages[0]["content"] == "hi"
-
-
-def test_remove_none_content_true_records_removal_change():
-    s = MessageSanitizer(remove_none_content=True, coerce_content_to_str=False)
-    msgs = [{"role": "user", "content": None}]
-    result = s.sanitize(msgs)
-    assert any("removed" in c.description for c in result.changes)
-
-
-def test_remove_none_content_false_keeps_none_message():
-    s = MessageSanitizer(remove_none_content=False, coerce_content_to_str=False)
-    msgs = [{"role": "user", "content": None}]
-    result = s.sanitize(msgs)
-    assert len(result.messages) == 1
-    assert result.messages[0]["content"] is None
-    assert result.changes == []
-
-
-def test_change_index_refers_to_original_list_index():
-    s = MessageSanitizer(remove_none_content=True, coerce_content_to_str=False)
-    msgs = [
-        {"role": "user", "content": None},   # index 0 — will be removed
-        {"role": "assistant", "content": None},  # index 1 — will be removed
-    ]
-    result = s.sanitize(msgs)
-    assert len(result.messages) == 0
-    removal_changes = [c for c in result.changes if "removed" in c.description]
-    indices = {c.index for c in removal_changes}
-    assert indices == {0, 1}
-
-
-# ---------------------------------------------------------------------------
-# max_content_chars tests
-# ---------------------------------------------------------------------------
-
-def test_long_content_truncated_with_ellipsis():
-    s = MessageSanitizer(max_content_chars=10)
-    msgs = [{"role": "user", "content": "a" * 20}]
-    result = s.sanitize(msgs)
-    assert result.messages[0]["content"] == "a" * 10 + "..."
-    assert any("truncated" in c.description for c in result.changes)
-
-
-def test_content_exactly_at_limit_not_truncated():
-    s = MessageSanitizer(max_content_chars=5)
+def test_sanitize_clean_messages_unchanged():
     msgs = [{"role": "user", "content": "hello"}]
-    result = s.sanitize(msgs)
-    assert result.messages[0]["content"] == "hello"
-    assert result.changes == []
+    r = sanitize_messages(msgs)
+    assert r.messages == [{"role": "user", "content": "hello"}]
+    assert r.ok
 
+def test_sanitize_empty_list():
+    r = sanitize_messages([])
+    assert r.messages == []
+    assert r.ok
 
-def test_truncation_total_length_is_limit_plus_three():
-    limit = 7
-    s = MessageSanitizer(max_content_chars=limit)
-    msgs = [{"role": "user", "content": "x" * 100}]
-    result = s.sanitize(msgs)
-    assert len(result.messages[0]["content"]) == limit + 3
-
-
-# ---------------------------------------------------------------------------
-# normalize_whitespace tests
-# ---------------------------------------------------------------------------
-
-def test_normalize_whitespace_true_collapses_spaces():
-    s = MessageSanitizer(normalize_whitespace=True)
-    msgs = [{"role": "user", "content": "  hello   world  "}]
-    result = s.sanitize(msgs)
-    assert result.messages[0]["content"] == "hello world"
-    assert any("whitespace" in c.description for c in result.changes)
-
-
-def test_normalize_whitespace_false_leaves_spaces():
-    s = MessageSanitizer(normalize_whitespace=False)
-    msgs = [{"role": "user", "content": "  hello   world  "}]
-    result = s.sanitize(msgs)
-    assert result.messages[0]["content"] == "  hello   world  "
-    assert result.changes == []
-
-
-def test_normalize_whitespace_no_change_if_already_clean():
-    s = MessageSanitizer(normalize_whitespace=True)
-    msgs = [{"role": "user", "content": "hello world"}]
-    result = s.sanitize(msgs)
-    assert result.messages[0]["content"] == "hello world"
-    assert result.changes == []
+def test_sanitize_preserves_multi_turn():
+    msgs = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "thanks"},
+    ]
+    r = sanitize_messages(msgs)
+    assert len(r.messages) == 3
 
 
 # ---------------------------------------------------------------------------
-# sanitize_one tests
+# None content removal
 # ---------------------------------------------------------------------------
 
-def test_sanitize_one_applies_operations_in_order():
-    # coerce int → "123\x00" would be odd, but with str input:
-    # strip_null_bytes happens before normalize_whitespace and truncation.
-    s = MessageSanitizer(
-        strip_null_bytes=True,
-        normalize_whitespace=True,
-        max_content_chars=5,
-        coerce_content_to_str=True,
+def test_remove_none_content():
+    msgs = [
+        {"role": "user", "content": None},
+        {"role": "user", "content": "valid"},
+    ]
+    r = sanitize_messages(msgs)
+    assert len(r.messages) == 1
+    assert r.removed_count == 1
+
+def test_keep_none_content_when_disabled():
+    msgs = [{"role": "user", "content": None}]
+    r = sanitize_messages(msgs, remove_none_content=False)
+    assert len(r.messages) == 1
+
+def test_none_content_adds_warning():
+    msgs = [{"role": "user", "content": None}]
+    r = sanitize_messages(msgs)
+    assert any("None content" in w for w in r.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Empty content removal
+# ---------------------------------------------------------------------------
+
+def test_remove_empty_string_content():
+    msgs = [{"role": "user", "content": ""}]
+    r = sanitize_messages(msgs)
+    assert r.removed_count == 1
+
+def test_remove_whitespace_only_content():
+    msgs = [{"role": "user", "content": "   "}]
+    r = sanitize_messages(msgs)
+    assert r.removed_count == 1
+
+def test_remove_empty_list_content():
+    msgs = [{"role": "user", "content": []}]
+    r = sanitize_messages(msgs)
+    assert r.removed_count == 1
+
+def test_keep_empty_content_when_disabled():
+    msgs = [{"role": "user", "content": ""}]
+    r = sanitize_messages(msgs, remove_empty_content=False)
+    assert len(r.messages) == 1
+
+
+# ---------------------------------------------------------------------------
+# Role normalization
+# ---------------------------------------------------------------------------
+
+def test_normalize_human_to_user():
+    msgs = [{"role": "human", "content": "hi"}]
+    r = sanitize_messages(msgs)
+    assert r.messages[0]["role"] == "user"
+    assert r.modified_count >= 1
+
+def test_normalize_ai_to_assistant():
+    msgs = [{"role": "ai", "content": "hello"}]
+    r = sanitize_messages(msgs)
+    assert r.messages[0]["role"] == "assistant"
+
+def test_normalize_bot_to_assistant():
+    msgs = [{"role": "bot", "content": "hello"}]
+    r = sanitize_messages(msgs)
+    assert r.messages[0]["role"] == "assistant"
+
+def test_normalize_model_to_assistant():
+    msgs = [{"role": "model", "content": "hi"}]
+    r = sanitize_messages(msgs)
+    assert r.messages[0]["role"] == "assistant"
+
+def test_normalize_roles_false():
+    msgs = [{"role": "human", "content": "hi"}]
+    r = sanitize_messages(msgs, normalize_roles=False)
+    assert r.messages[0]["role"] == "human"
+
+def test_normalize_case_insensitive():
+    msgs = [{"role": "HUMAN", "content": "hi"}]
+    r = sanitize_messages(msgs)
+    assert r.messages[0]["role"] == "user"
+
+def test_known_role_unchanged():
+    msgs = [{"role": "user", "content": "hi"}]
+    r = sanitize_messages(msgs)
+    assert r.messages[0]["role"] == "user"
+    assert r.ok
+
+
+# ---------------------------------------------------------------------------
+# Content block sanitization
+# ---------------------------------------------------------------------------
+
+def test_empty_text_block_removed():
+    msgs = [{"role": "user", "content": [
+        {"type": "text", "text": ""},
+        {"type": "text", "text": "real content"},
+    ]}]
+    r = sanitize_messages(msgs)
+    assert len(r.messages[0]["content"]) == 1
+
+def test_whitespace_text_block_removed():
+    msgs = [{"role": "user", "content": [
+        {"type": "text", "text": "   "},
+    ]}]
+    r = sanitize_messages(msgs)
+    assert r.removed_count == 1  # whole message dropped (no blocks left)
+
+def test_non_dict_block_removed():
+    msgs = [{"role": "user", "content": [
+        "not a dict",
+        {"type": "text", "text": "valid"},
+    ]}]
+    r = sanitize_messages(msgs)
+    assert len(r.messages[0]["content"]) == 1
+
+def test_allowed_block_types_filters():
+    msgs = [{"role": "user", "content": [
+        {"type": "text", "text": "hello"},
+        {"type": "image", "source": {}},
+    ]}]
+    r = sanitize_messages(msgs, allowed_block_types=frozenset({"text"}))
+    assert len(r.messages[0]["content"]) == 1
+    assert r.messages[0]["content"][0]["type"] == "text"
+
+def test_all_blocks_removed_drops_message():
+    msgs = [{"role": "user", "content": [
+        {"type": "text", "text": ""},
+    ]}]
+    r = sanitize_messages(msgs)
+    assert r.removed_count == 1
+    assert len(r.messages) == 0
+
+
+# ---------------------------------------------------------------------------
+# Non-dict messages
+# ---------------------------------------------------------------------------
+
+def test_non_dict_message_dropped():
+    msgs = ["not a dict", {"role": "user", "content": "ok"}]
+    r = sanitize_messages(msgs)
+    assert len(r.messages) == 1
+    assert r.removed_count == 1
+
+
+# ---------------------------------------------------------------------------
+# remove_unknown_keys
+# ---------------------------------------------------------------------------
+
+def test_remove_unknown_keys():
+    msgs = [{"role": "user", "content": "hi", "metadata": {"id": 1}}]
+    r = sanitize_messages(msgs, remove_unknown_keys=True)
+    assert set(r.messages[0].keys()) == {"role", "content"}
+
+def test_keep_keys_custom():
+    msgs = [{"role": "user", "content": "hi", "name": "Alice"}]
+    r = sanitize_messages(
+        msgs,
+        remove_unknown_keys=True,
+        keep_keys=frozenset({"role", "content", "name"}),
     )
-    msg = {"role": "user", "content": "ab\x00  cd  ef"}
-    new_msg, changes = s.sanitize_one(msg, index=0)
-    # After null strip: "ab  cd  ef"
-    # After normalize: "ab cd ef"
-    # After truncate (limit=5): "ab cd..."
-    assert new_msg["content"] == "ab cd..."
-    assert len(changes) >= 2  # at least null strip + truncation
-
-
-def test_sanitize_one_index_propagated_in_changes():
-    s = MessageSanitizer(strip_null_bytes=True)
-    msg = {"role": "user", "content": "a\x00b"}
-    _, changes = s.sanitize_one(msg, index=7)
-    assert changes[0].index == 7
+    assert "name" in r.messages[0]
 
 
 # ---------------------------------------------------------------------------
-# sanitize_text tests
+# Collapse adjacent same-role
 # ---------------------------------------------------------------------------
 
-def test_sanitize_text_strips_null_bytes():
-    s = MessageSanitizer(strip_null_bytes=True)
-    text, descs = s.sanitize_text("hel\x00lo")
-    assert text == "hello"
-    assert any("null" in d for d in descs)
+def test_collapse_adjacent_same_role_string():
+    msgs = [
+        {"role": "user", "content": "first"},
+        {"role": "user", "content": "second"},
+    ]
+    r = sanitize_messages(msgs, collapse_adjacent_same_role=True)
+    assert len(r.messages) == 1
+    assert "first" in r.messages[0]["content"]
+    assert "second" in r.messages[0]["content"]
+
+def test_collapse_different_roles_not_merged():
+    msgs = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    r = sanitize_messages(msgs, collapse_adjacent_same_role=True)
+    assert len(r.messages) == 2
+
+def test_collapse_three_same_role():
+    msgs = [
+        {"role": "user", "content": "a"},
+        {"role": "user", "content": "b"},
+        {"role": "user", "content": "c"},
+    ]
+    r = sanitize_messages(msgs, collapse_adjacent_same_role=True)
+    assert len(r.messages) == 1
+
+def test_collapse_separator():
+    msgs = [
+        {"role": "user", "content": "first"},
+        {"role": "user", "content": "second"},
+    ]
+    r = sanitize_messages(msgs, collapse_adjacent_same_role=True, collapse_separator="---")
+    assert "---" in r.messages[0]["content"]
+
+def test_collapse_list_content():
+    msgs = [
+        {"role": "user", "content": [{"type": "text", "text": "a"}]},
+        {"role": "user", "content": [{"type": "text", "text": "b"}]},
+    ]
+    r = sanitize_messages(msgs, collapse_adjacent_same_role=True)
+    assert len(r.messages) == 1
+    assert len(r.messages[0]["content"]) == 2
 
 
-def test_sanitize_text_truncates():
-    s = MessageSanitizer(max_content_chars=3)
-    text, descs = s.sanitize_text("abcdef")
-    assert text == "abc..."
-    assert any("truncated" in d for d in descs)
+# ---------------------------------------------------------------------------
+# SanitizeResult
+# ---------------------------------------------------------------------------
+
+def test_result_len():
+    msgs = [{"role": "user", "content": "hi"}]
+    r = sanitize_messages(msgs)
+    assert len(r) == 1
+
+def test_result_ok_true():
+    msgs = [{"role": "user", "content": "hi"}]
+    r = sanitize_messages(msgs)
+    assert r.ok
+
+def test_result_ok_false_when_modified():
+    msgs = [{"role": "human", "content": "hi"}]
+    r = sanitize_messages(msgs)
+    assert not r.ok
 
 
-def test_sanitize_text_normalizes_whitespace():
-    s = MessageSanitizer(normalize_whitespace=True)
-    text, descs = s.sanitize_text("  foo   bar  ")
-    assert text == "foo bar"
-    assert any("whitespace" in d for d in descs)
+# ---------------------------------------------------------------------------
+# Convenience functions
+# ---------------------------------------------------------------------------
 
+def test_clean_messages_returns_list():
+    msgs = [{"role": "user", "content": "hi"}]
+    result = clean_messages(msgs)
+    assert isinstance(result, list)
 
-def test_sanitize_text_clean_no_descriptions():
-    s = MessageSanitizer()
-    text, descs = s.sanitize_text("clean text")
-    assert text == "clean text"
-    assert descs == []
+def test_drop_empty_removes_none():
+    msgs = [
+        {"role": "user", "content": None},
+        {"role": "user", "content": "ok"},
+    ]
+    result = drop_empty(msgs)
+    assert len(result) == 1
+
+def test_normalize_roles_fn():
+    msgs = [{"role": "human", "content": "hi"}]
+    result = normalize_roles(msgs)
+    assert result[0]["role"] == "user"
+
+def test_role_aliases_exported():
+    assert "human" in ROLE_ALIASES
+    assert ROLE_ALIASES["human"] == "user"
